@@ -1,0 +1,6 @@
+streamlit 
+numpy 
+pandas 
+sqlalchemy 
+ollama
+requests
