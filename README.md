@@ -1,3 +1,3 @@
 Current status - 
-1. Error with AI analysis for numerical columns identification - rerun the existing code and debug to understand the issue better. 
-2. Needs to add a code snippet to add date time identification. 
+1. Error with AI analysis for numerical columns identification - prompt changed - completed (hopefully)
+2. Needs to add a code snippet to add date time identification. - completed - but another error of year as numerical has arised!
