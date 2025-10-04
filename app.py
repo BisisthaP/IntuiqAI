@@ -27,6 +27,7 @@ def call_llama_verification_langchain(analysis_summary):
     - Categorical: {len(analysis_summary['datatypes']['categorical_columns'])} columns  
     - Boolean: {len(analysis_summary['datatypes']['boolean_columns'])} columns
     - Other: {len(analysis_summary['datatypes']['other_columns'])} columns
+    - Datetime: {len(analysis_summary['datatypes']['datetime_columns'])} columns
     
     Missing Values:
     - Total nulls/NaN: {analysis_summary['missing_values']['total_nulls']}
@@ -129,18 +130,20 @@ if uploaded_file is not None:
             st.metric("Null/NaN Values", analysis_summary["missing_values"]["total_nulls"])
         with col2:
             st.metric("Missing Indicators", analysis_summary["missing_values"]["total_missing_indicators"])
-
+        
+        st.metric("Datetime Columns", len(analysis_summary["datatypes"]["datetime_columns"]))
         # Display detailed analysis tables
         st.subheader("Detailed Analysis")
 
         with st.expander("Data Types"):
             st.table(pd.DataFrame({
-                'Type': ['Numerical', 'Categorical', 'Boolean', 'Other'],
+                'Type': ['Numerical', 'Categorical', 'Boolean', 'Other','Datetime'],
                 'Count': [
                     len(analysis_summary["datatypes"]["numerical_columns"]),
                     len(analysis_summary["datatypes"]["categorical_columns"]),
                     len(analysis_summary["datatypes"]["boolean_columns"]),
-                    len(analysis_summary["datatypes"]["other_columns"])
+                    len(analysis_summary["datatypes"]["other_columns"]),
+                    len(analysis_summary["datatypes"]["datetime_columns"])
                 ]
             }))
 

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np 
 import requests
 import json
+import re 
 
 def datatype_detection(df):
     dtypes = df.dtypes #identify all the datatypes 
@@ -11,37 +12,47 @@ def datatype_detection(df):
 
     other_cols = [col for col in df.columns if col not in num_cols + cat_cols + bool_cols]
 
-    # Detect datetime-related columns
-    datetime_keywords = ['year', 'month', 'date', 'day', 'yr', 'mon', 'dt', 'time', 
-                        'week', 'quarter', 'season', 'period']
-    
+    # NEW: Detect datetime-related columns - ONLY through pattern matching, not keywords
     datetime_cols = []
     
-    # Check column names for datetime keywords
-    for col in num_cols + cat_cols + other_cols:
-        col_lower = col.lower()
-        if any(keyword in col_lower for keyword in datetime_keywords):
-            datetime_cols.append(col)
+    # Check for date format columns in object/string columns
+    for col in cat_cols:
+        if df[col].dtype == 'object':
+            # Sample some values to check for date patterns
+            sample_values = df[col].dropna().head(10)
+            date_count = 0
+            total_checked = len(sample_values)
+            
+            if total_checked > 0:
+                for value in sample_values:
+                    value_str = str(value)
+                    # Check for common date patterns (actual date formats, not just time-related words)
+                    if (re.match(r'\d{1,2}/\d{1,2}/\d{2,4}', value_str) or  # dd/mm/yy or dd/mm/yyyy
+                        re.match(r'\d{1,2}-\d{1,2}-\d{2,4}', value_str) or  # dd-mm-yy or dd-mm-yyyy
+                        re.match(r'\d{4}-\d{1,2}-\d{1,2}', value_str) or    # yyyy-mm-dd
+                        re.match(r'\d{1,2}\.\d{1,2}\.\d{2,4}', value_str) or # dd.mm.yy or dd.mm.yyyy
+                        re.match(r'\d{2,4}-\d{1,2}-\d{1,2}[T\s]\d{1,2}:\d{2}', value_str) or  # datetime with time
+                        re.match(r'\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}', value_str)):     # datetime with time
+                        date_count += 1
+                
+                # If majority of sampled values match actual date patterns, consider it a date column
+                if date_count / total_checked >= 0.6:
+                    datetime_cols.append(col)
     
-    # Remove datetime columns from their original categories and add to categorical
+    # Remove datetime columns from categorical and add to datetime
     for col in datetime_cols:
-        if col in num_cols:
-            num_cols.remove(col)
-        if col in other_cols:
-            other_cols.remove(col)
-        if col not in cat_cols:
-            cat_cols.append(col)
+        if col in cat_cols:
+            cat_cols.remove(col)
     
     category_counts = {col: df[col].nunique() for col in cat_cols}
-    #unique_categories = {col: df[col].unique().tolist() for col in cat_cols}
     
     return {
-        "numerical":num_cols,
-        "categorical":cat_cols,
-        "boolean":bool_cols,
-        "other":other_cols,
+        "numerical": num_cols,
+        "categorical": cat_cols,
+        "boolean": bool_cols,
+        "other": other_cols,
+        "datetime": datetime_cols,  # Only actual date-formatted columns
         "category_counts": category_counts
-        #"unique_categories": unique_categories
     }
 
 def detect_missing_values(df):
@@ -141,7 +152,8 @@ def prepare_analysis_summary(df, datatype_result, missing_result, outlier_result
             "numerical_columns": datatype_result["numerical"],
             "categorical_columns": datatype_result["categorical"],
             "boolean_columns": datatype_result["boolean"],
-            "other_columns": datatype_result["other"]
+            "other_columns": datatype_result["other"],
+            "datetime_columns": datatype_result["datetime"]  # NEW: Add datetime columns
         },
         "missing_values": {
             "total_nulls": missing_result["total_nulls"],
