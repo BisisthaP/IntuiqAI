@@ -1,9 +1,11 @@
 # processing.py
 import pandas as pd
 import numpy as np
-from langchain_community.llms import Ollama
 import json
-from typing import Dict, Any, List
+import sqlite3
+from typing import Dict, Any, List, Tuple
+import hashlib
+from datetime import datetime
 
 class DatasetAnalyzer:
     def __init__(self):
@@ -17,7 +19,6 @@ class DatasetAnalyzer:
         self.categorical_threshold = 0.05
 
     def detect_column_type(self, series: pd.Series) -> str:
-        """Detect the most appropriate data type for a column"""
         dtype = series.dtype
         non_null = series.dropna()
         
@@ -143,6 +144,319 @@ class DatasetAnalyzer:
         
         return outliers
 
+class DataProcessor:
+    def __init__(self):
+        self.original_df = None
+        self.processed_df = None
+        self.changes_log = []
+        self.dataset_id = None
+        
+    def generate_dataset_id(self, df):
+        """Generate unique ID for dataset"""
+        content_hash = hashlib.md5(pd.util.hash_pandas_object(df).values.tobytes()).hexdigest()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"dataset_{timestamp}_{content_hash[:8]}"
+    
+    def store_datasets(self, original_df, processed_df, dataset_id):
+        """Store both datasets in SQLite"""
+        self.dataset_id = dataset_id
+        conn = sqlite3.connect('datasets.db')
+        
+        # Store original
+        original_df.to_sql(f'{dataset_id}_original', conn, if_exists='replace', index=False)
+        
+        # Store processed
+        processed_df.to_sql(f'{dataset_id}_processed', conn, if_exists='replace', index=False)
+        
+        # Store changes log
+        changes_df = pd.DataFrame(self.changes_log)
+        changes_df.to_sql(f'{dataset_id}_changes', conn, if_exists='replace', index=False)
+        
+        conn.close()
+    
+    def get_stored_dataset(self, dataset_id, version='processed'):
+        """Retrieve stored dataset"""
+        conn = sqlite3.connect('datasets.db')
+        try:
+            df = pd.read_sql(f'SELECT * FROM {dataset_id}_{version}', conn)
+            return df
+        except:
+            return None
+        finally:
+            conn.close()
+
+    def remove_whitespace_and_trim(self, df):
+        """Remove leading/trailing whitespace from all string columns"""
+        changes = []
+        for col in df.select_dtypes(include=['object']).columns:
+            before_count = df[col].astype(str).str.strip().ne(df[col].astype(str)).sum()
+            if before_count > 0:
+                df[col] = df[col].astype(str).str.strip()
+                changes.append(f"Trimmed whitespace from {col}: {before_count} cells")
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def fill_missing_custom_keyword(self, df, analysis):
+        """Replace custom missing indicators with proper nulls"""
+        changes = []
+        for col, info in analysis.items():
+            if info['custom_missing'] > 0:
+                before_count = info['custom_missing']
+                # Replace custom missing with NaN first
+                df[col] = df[col].replace(self.missing_indicators, np.nan)
+                changes.append(f"Replaced custom missing in {col}: {before_count} values")
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def fill_missing_mean_median_mode(self, df, analysis):
+        """Impute missing values based on column type"""
+        changes = []
+        for col, info in analysis.items():
+            total_missing = info['missing'] + info['custom_missing']
+            if total_missing > 0:
+                if info['type'] == 'numerical':
+                    # Use median for numerical to handle outliers
+                    impute_value = df[col].median()
+                    df[col].fillna(impute_value, inplace=True)
+                    changes.append(f"Imputed {col} with median: {impute_value:.2f}")
+                elif info['type'] in ['categorical', 'boolean']:
+                    # Use mode for categorical
+                    impute_value = df[col].mode()[0] if not df[col].mode().empty else 'Unknown'
+                    df[col].fillna(impute_value, inplace=True)
+                    changes.append(f"Imputed {col} with mode: {impute_value}")
+                elif info['type'] == 'datetime':
+                    # Forward fill for datetime
+                    df[col].fillna(method='ffill', inplace=True)
+                    changes.append(f"Forward-filled missing dates in {col}")
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def remove_duplicates(self, df):
+        """Remove duplicate rows across entire dataset"""
+        before_rows = len(df)
+        df = df.drop_duplicates()
+        after_rows = len(df)
+        duplicates_removed = before_rows - after_rows
+        
+        changes = []
+        if duplicates_removed > 0:
+            changes.append(f"Removed {duplicates_removed} duplicate rows")
+            self.changes_log.extend(changes)
+        
+        return df, changes
+
+    def convert_dtype(self, df, analysis):
+        """Convert columns to proper data types"""
+        changes = []
+        for col, info in analysis.items():
+            current_dtype = str(df[col].dtype)
+            
+            if info['type'] == 'datetime' and not pd.api.types.is_datetime64_any_dtype(df[col]):
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                    changes.append(f"Converted {col} to datetime")
+                except:
+                    pass
+                    
+            elif info['type'] == 'numerical' and not pd.api.types.is_numeric_dtype(df[col]):
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    changes.append(f"Converted {col} to numerical")
+                except:
+                    pass
+            
+            elif info['type'] == 'boolean' and not pd.api.types.is_bool_dtype(df[col]):
+                try:
+                    df[col] = df[col].astype(bool)
+                    changes.append(f"Converted {col} to boolean")
+                except:
+                    pass
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def remove_outliers(self, df, analysis):
+        """Cap outliers using IQR method for numerical columns"""
+        changes = []
+        for col, info in analysis.items():
+            if info['type'] == 'numerical' and info['outliers'] and info['outliers'] > 0:
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                
+                # Cap outliers instead of removing
+                outliers_before = ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
+                df[col] = np.where(df[col] < lower_bound, lower_bound, df[col])
+                df[col] = np.where(df[col] > upper_bound, upper_bound, df[col])
+                
+                changes.append(f"Capped outliers in {col}: {outliers_before} values")
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def standardize_data_formats(self, df, analysis):
+        """Standardize text formats and date formats"""
+        changes = []
+        for col, info in analysis.items():
+            if info['type'] in ['categorical', 'text']:
+                # Standardize text casing
+                df[col] = df[col].astype(str).str.title()
+                changes.append(f"Standardized text casing in {col}")
+            
+            elif info['type'] == 'datetime':
+                # Ensure consistent datetime format
+                df[col] = pd.to_datetime(df[col]).dt.strftime('%Y-%m-%d')
+                changes.append(f"Standardized date format in {col}")
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def remove_unnecessary_columns(self, df, analysis, threshold=50):
+        """Remove columns with high missing values or low variance"""
+        changes = []
+        columns_to_drop = []
+        
+        for col, info in analysis.items():
+            missing_percentage = (info['missing'] + info['custom_missing']) / info['total_count'] * 100
+            
+            # Drop if missing > threshold% or very low variance
+            if missing_percentage > threshold:
+                columns_to_drop.append(col)
+                changes.append(f"Removed {col}: {missing_percentage:.1f}% missing")
+            elif info['nunique'] == 1:
+                columns_to_drop.append(col)
+                changes.append(f"Removed {col}: constant value")
+        
+        df = df.drop(columns=columns_to_drop)
+        
+        if changes:
+            self.changes_log.extend(changes)
+        return df, changes
+
+    def get_cleaning_recommendations(self, df, analysis):
+        """Generate cleaning recommendations based on analysis"""
+        recommendations = []
+        
+        # Check for duplicates
+        if len(df) != len(df.drop_duplicates()):
+            recommendations.append({
+                'function': 'remove_duplicates',
+                'reason': f"Dataset has {len(df) - len(df.drop_duplicates())} duplicate rows",
+                'priority': 'high'
+            })
+        
+        # Check for custom missing values
+        total_custom_missing = sum(info['custom_missing'] for info in analysis.values())
+        if total_custom_missing > 0:
+            recommendations.append({
+                'function': 'fill_missing_custom_keyword',
+                'reason': f"Found {total_custom_missing} custom missing values (Not Given, Unknown, etc.)",
+                'priority': 'high'
+            })
+        
+        # Check for standard missing values
+        total_missing = sum(info['missing'] + info['custom_missing'] for info in analysis.values())
+        if total_missing > 0:
+            recommendations.append({
+                'function': 'fill_missing_mean_median_mode', 
+                'reason': f"Found {total_missing} total missing values needing imputation",
+                'priority': 'medium'
+            })
+        
+        # Check for whitespace issues
+        text_columns = df.select_dtypes(include=['object']).columns
+        whitespace_issues = any(df[col].astype(str).str.strip().ne(df[col].astype(str)).any() for col in text_columns)
+        if whitespace_issues:
+            recommendations.append({
+                'function': 'remove_whitespace_and_trim',
+                'reason': "Found leading/trailing whitespace in text columns",
+                'priority': 'medium'
+            })
+        
+        # Check for data type issues
+        type_issues = any(
+            (info['type'] == 'datetime' and not pd.api.types.is_datetime64_any_dtype(df[col])) or
+            (info['type'] == 'numerical' and not pd.api.types.is_numeric_dtype(df[col]))
+            for col, info in analysis.items()
+        )
+        if type_issues:
+            recommendations.append({
+                'function': 'convert_dtype',
+                'reason': "Found columns with incorrect data types",
+                'priority': 'high'
+            })
+        
+        # Check for outliers
+        total_outliers = sum(info['outliers'] for info in analysis.values() if info['outliers'])
+        if total_outliers > 0:
+            recommendations.append({
+                'function': 'remove_outliers',
+                'reason': f"Found {total_outliers} outliers in numerical columns",
+                'priority': 'low'
+            })
+        
+        # Check for formatting issues
+        formatting_issues = any(info['type'] in ['categorical', 'text'] for info in analysis.values())
+        if formatting_issues:
+            recommendations.append({
+                'function': 'standardize_data_formats',
+                'reason': "Text columns need standardization for better filtering",
+                'priority': 'low'
+            })
+        
+        # Sort by priority
+        priority_order = {'high': 0, 'medium': 1, 'low': 2}
+        recommendations.sort(key=lambda x: priority_order[x['priority']])
+        
+        return recommendations
+
+    def apply_cleaning_functions(self, df, analysis, selected_functions):
+        """Apply selected cleaning functions in optimal order"""
+        self.original_df = df.copy()
+        self.processed_df = df.copy()
+        self.changes_log = []
+        
+        # Define optimal execution order
+        function_order = [
+            'remove_whitespace_and_trim',
+            'fill_missing_custom_keyword', 
+            'convert_dtype',
+            'remove_duplicates',
+            'fill_missing_mean_median_mode',
+            'remove_outliers',
+            'standardize_data_formats',
+            'remove_unnecessary_columns'
+        ]
+        
+        # Filter and order selected functions
+        ordered_functions = [f for f in function_order if f in selected_functions]
+        
+        all_changes = []
+        for func_name in ordered_functions:
+            func = getattr(self, func_name)
+            if func_name in ['remove_unnecessary_columns']:
+                self.processed_df, changes = func(self.processed_df, analysis)
+            else:
+                self.processed_df, changes = func(self.processed_df, analysis)
+            all_changes.extend(changes)
+        
+        # Store datasets
+        dataset_id = self.generate_dataset_id(self.original_df)
+        self.store_datasets(self.original_df, self.processed_df, dataset_id)
+        
+        return self.processed_df, all_changes, dataset_id
+
 def analyze_dataset(df: pd.DataFrame) -> Dict[str, Any]:
     analyzer = DatasetAnalyzer()
     analysis = {}
@@ -212,100 +526,4 @@ def analysis_to_jsonl(df: pd.DataFrame, analysis: Dict[str, Any]) -> str:
     
     return "\n".join(jsonl_lines)
 
-def verify_with_llm(analysis_jsonl: str) -> str:
-    llm = Ollama(model='llama3.2:1b')
-    
-    prompt = f"""
-You are a data cleaning specialist for dashboard preparation. Provide SPECIFIC cleaning steps for each column.
-
-STRUCTURED DATASET ANALYSIS (JSONL):
-{analysis_jsonl}
-
-CRITICAL: Provide EXACT cleaning code and steps for dashboard preparation. Be specific and actionable.
-
-DASHBOARD CLEANING REQUIREMENTS:
-1. Handle missing values with dashboard-friendly imputation
-2. Standardize formats for filtering and grouping
-3. Ensure data types work with common visualization libraries
-4. Create derived columns for common analytics
-
-OUTPUT FORMAT (JSON):
-{{
-  "column_assessments": [
-    {{
-      "column_name": "string",
-      "verified_type": "string",
-      "dashboard_issues": ["specific issues affecting dashboards"],
-      "cleaning_steps": [
-        {{
-          "step": "string",
-          "code": "pandas code snippet",
-          "reason": "dashboard benefit"
-        }}
-      ],
-      "derived_columns": ["suggested new columns for analytics"]
-    }}
-  ],
-  "overall_cleaning_pipeline": [
-    {{
-      "step": "string",
-      "code": "pandas code snippet", 
-      "priority": "high|medium|low"
-    }}
-  ],
-  "dashboard_optimizations": [
-    "specific optimizations for better dashboard performance"
-  ]
-}}
-
-CLEANING PATTERNS BY DATA TYPE:
-
-IDENTIFIER COLUMNS:
-- Issues: Duplicates, format inconsistencies
-- Cleaning: Validate uniqueness, standardize formats
-- Code: `df['col'] = df['col'].astype(str).str.strip()`
-
-CATEGORICAL COLUMNS:
-- Issues: Too many categories, inconsistent casing
-- Cleaning: Group rare categories, standardize text
-- Code: `df['col'] = df['col'].str.title().replace({{'old_val': 'new_val'}})`
-
-NUMERICAL COLUMNS:  
-- Issues: Outliers, wrong data types
-- Cleaning: Handle outliers, convert types
-- Code: `df['col'] = pd.to_numeric(df['col'], errors='coerce')`
-
-DATETIME COLUMNS:
-- Issues: Multiple formats, timezone issues
-- Cleaning: Standardize format, extract features
-- Code: `df['col'] = pd.to_datetime(df['col'], errors='coerce')`
-
-DURATION COLUMNS:
-- Issues: Mixed units, inconsistent formats
-- Cleaning: Convert to standard units
-- Code: `df['duration_min'] = df['col'].apply(convert_to_minutes)`
-
-HIGH-CARDINALITY COLUMNS (>1000 unique):
-- Issues: Poor filter performance, slow visualizations
-- Cleaning: Create grouped versions, use top-N categories
-
-MISSING DATA STRATEGIES:
-- <5% missing: Simple imputation
-- 5-30% missing: Advanced imputation with validation
-- >30% missing: Consider exclusion or flagging
-
-Provide ready-to-use pandas code for each cleaning step.
-"""
-    
-    try:
-        response = llm.invoke(prompt)
-        return response
-    except Exception as e:
-        return json.dumps({
-            "error": f"LLM processing failed: {str(e)}",
-            "column_assessments": [],
-            "overall_cleaning_pipeline": []
-        })
-
-def analysis_to_string(df: pd.DataFrame, analysis: Dict[str, Any]) -> str:
-    return analysis_to_jsonl(df, analysis)
+# Remove the verify_with_llm function since we're no longer using AI verification
