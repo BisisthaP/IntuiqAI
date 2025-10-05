@@ -4,3 +4,4 @@ pandas
 sqlalchemy 
 ollama
 requests
+re 
