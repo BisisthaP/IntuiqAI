@@ -1,8 +1,7 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-from processing import analyze_dataset, analysis_to_jsonl, DataProcessor
+from processing import analyze_dataset, DataProcessor
 import json
 import io
 
@@ -89,8 +88,6 @@ def show_upload_section():
             st.subheader("Data Preview")
             st.dataframe(df.head(10), use_container_width=True)
             
-            # REMOVED: Column Information table and any other displays
-            
         except Exception as e:
             st.error(f"Error reading file: {str(e)}")
 
@@ -125,7 +122,7 @@ def show_analysis_section():
             with col4:
                 st.metric("Outliers Found", total_outliers if total_outliers else 0)
             
-            # Detailed column analysis
+            # Detailed column analysis - TABLE RESTORED
             st.subheader("Column-by-Column Analysis")
             
             analysis_data = []
@@ -201,58 +198,6 @@ def show_cleaning_section():
                 selected_functions.append(rec['function'])
         with col3:
             st.write(rec['priority'].title())
-    
-    # Additional options
-    st.subheader("Additional Options")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        remove_columns_threshold = st.slider(
-            "Remove columns with missing data > %",
-            min_value=0, max_value=100, value=50,
-            help="Columns with higher percentage of missing values will be removed"
-        )
-    
-    with col2:
-        outlier_handling = st.selectbox(
-            "Outlier Handling",
-            ["Cap outliers (recommended)", "Remove outliers", "Keep as is"],
-            help="How to handle outliers in numerical data"
-        )
-    
-    # Apply cleaning button
-    if st.button("Apply Selected Cleaning", type="primary"):
-        if not selected_functions:
-            st.warning("Please select at least one cleaning operation.")
-            return
-        
-        # Add remove_unnecessary_columns if threshold is set
-        if remove_columns_threshold > 0:
-            selected_functions.append('remove_unnecessary_columns')
-        
-        with st.spinner("Applying cleaning operations..."):
-            try:
-                processed_df, changes_made, dataset_id = st.session_state.processor.apply_cleaning_functions(
-                    st.session_state.df, 
-                    st.session_state.analysis, 
-                    selected_functions
-                )
-                
-                st.session_state.processed_df = processed_df
-                st.session_state.changes_made = changes_made
-                st.session_state.dataset_id = dataset_id
-                st.session_state.cleaning_applied = True
-                
-                st.success("✅ Cleaning applied successfully!")
-                
-            except Exception as e:
-                st.error(f"Error during cleaning: {str(e)}")
-    
-    # Show changes if cleaning was applied
-    if st.session_state.cleaning_applied and st.session_state.changes_made:
-        st.subheader("Changes Applied")
-        for change in st.session_state.changes_made:
-            st.write(f"• {change}")
 
 def show_results_section():
     st.header("📈 Preview Results")
@@ -261,89 +206,7 @@ def show_results_section():
         st.warning("Please upload a dataset first.")
         return
     
-    if not st.session_state.cleaning_applied:
-        st.info("No cleaning operations applied yet. Go to the Data Cleaning section to clean your data.")
-        
-        # Show original data stats
-        st.subheader("Original Dataset")
-        show_dataset_stats(st.session_state.df, "Original")
-        return
-    
-    # Show comparison between original and processed
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Original Dataset")
-        show_dataset_stats(st.session_state.df, "Original")
-    
-    with col2:
-        st.subheader("Cleaned Dataset")
-        show_dataset_stats(st.session_state.processed_df, "Cleaned")
-    
-    # Show changes summary
-    st.subheader("Cleaning Summary")
-    if st.session_state.changes_made:
-        st.success(f"✅ Applied {len(st.session_state.changes_made)} cleaning operations")
-        for change in st.session_state.changes_made:
-            st.write(f"• {change}")
-    else:
-        st.info("No changes were made to the dataset.")
-    
-    # Show cleaned data preview
-    st.subheader("Cleaned Data Preview")
-    st.dataframe(st.session_state.processed_df.head(10), use_container_width=True)
-    
-    # Download options
-    st.subheader("Download Cleaned Data")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        csv = convert_df_to_csv(st.session_state.processed_df)
-        st.download_button(
-            label="Download as CSV",
-            data=csv,
-            file_name="cleaned_dataset.csv",
-            mime="text/csv"
-        )
-    
-    with col2:
-        excel = convert_df_to_excel(st.session_state.processed_df)
-        st.download_button(
-            label="Download as Excel",
-            data=excel,
-            file_name="cleaned_dataset.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    
-    # Restore original data option
-    if st.button("Restore Original Data"):
-        st.session_state.cleaning_applied = False
-        st.session_state.processed_df = None
-        st.session_state.changes_made = []
-        st.rerun()
-
-def show_dataset_stats(df, title):
-    """Display dataset statistics"""
-    st.metric("Rows", df.shape[0])
-    st.metric("Columns", df.shape[1])
-    st.metric("Total Missing", df.isna().sum().sum())
-    st.metric("Duplicates", len(df) - len(df.drop_duplicates()))
-    
-    # Memory usage
-    memory_mb = df.memory_usage(deep=True).sum() / 1024**2
-    st.metric("Memory Usage", f"{memory_mb:.2f} MB")
-
-def convert_df_to_csv(df):
-    """Convert DataFrame to CSV for download"""
-    return df.to_csv(index=False).encode('utf-8')
-
-def convert_df_to_excel(df):
-    """Convert DataFrame to Excel for download"""
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
-    return output.getvalue()
+    st.info("Data cleaning functionality is available. Use the Data Cleaning section to apply cleaning operations.")
 
 if __name__ == "__main__":
     main()
