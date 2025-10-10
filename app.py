@@ -85,19 +85,11 @@ def show_upload_section():
             with col3:
                 st.metric("Memory Usage", f"{df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
             
-            # Show data preview
+            # Show data preview ONLY - removed column information table
             st.subheader("Data Preview")
             st.dataframe(df.head(10), use_container_width=True)
             
-            # Show column info
-            st.subheader("Column Information")
-            col_info = pd.DataFrame({
-                'Column': df.columns,
-                'Data Type': df.dtypes.values,
-                'Non-Null Count': df.notna().sum().values,
-                'Null Count': df.isna().sum().values
-            })
-            st.dataframe(col_info, use_container_width=True)
+            # REMOVED: Column Information table and any other displays
             
         except Exception as e:
             st.error(f"Error reading file: {str(e)}")
